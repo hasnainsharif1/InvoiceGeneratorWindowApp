@@ -4,29 +4,59 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const remote = require('@electron/remote');
-const arabicReshaper = require('arabic-reshaper');
-const bidi = require('bidi');
 
 // Global variables - Initialize at the top
 let selectedRow = null;
 let items = [];
 let editingFileName = null;
 
-// Helper function to render Arabic text properly in jsPDF
-// Note: jsPDF's default fonts (Helvetica) don't support Arabic characters.
-// For proper Arabic rendering, you need to add an Arabic-supporting font to jsPDF VFS.
-// This function reshapes Arabic text for proper display, but Arabic characters may still
-// appear as boxes/symbols if the font doesn't support them. To fix this:
-// 1. Add an Arabic font (like Noto Sans Arabic or Amiri) to jsPDF VFS
-// 2. Use doc.setFont('arabic-font-name') before rendering Arabic text
-function renderArabicText(doc, text, x, y, options = {}) {
+// Function to load the Arabic font (Amiri)
+function loadArabicFont() {
+    try {
+        const fontPath = getResourcePath('Amiri-Regular.ttf');
+        if (fs.existsSync(fontPath)) {
+            console.log('Amiri font file found:', fontPath);
+            return true;
+        } else {
+            console.warn('Amiri font file not found:', fontPath);
+            return false;
+        }
+    } catch (error) {
+        console.error('Error loading Arabic font:', error);
+        return false;
+    }
+}
+
+// Function to add Arabic font to jsPDF document
+function addArabicFontToDoc(doc) {
+    try {
+        const fontPath = getResourcePath('Amiri-Regular.ttf');
+        if (fs.existsSync(fontPath)) {
+            // Register the Amiri font with jsPDF
+            doc.addFont(fontPath, 'Amiri', 'normal');
+            doc.addFont(fontPath, 'Amiri', 'bold');
+            console.log('Amiri font added to jsPDF document');
+            return true;
+        } else {
+            console.warn('Amiri font file not found, using default font');
+            return false;
+        }
+    } catch (error) {
+        console.error('Error adding Arabic font to jsPDF:', error);
+        return false;
+    }
+}
+
+// Helper function to render bilingual text properly in jsPDF
+function renderBilingualText(doc, text, x, y, options = {}) {
     try {
         // Check if text contains Arabic characters
         const arabicRegex = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
         const hasArabic = arabicRegex.test(text);
         
         if (!hasArabic) {
-            // No Arabic text, render normally
+            // No Arabic text, render normally with default font
+            doc.setFont('helvetica');
             doc.text(text, x, y, options);
             return;
         }
@@ -75,26 +105,27 @@ function renderArabicText(doc, text, x, y, options = {}) {
             // Calculate positions
             if (englishText && arabicText) {
                 // Both English and Arabic - render English on left, Arabic on right
+                // Set English font
+                doc.setFont('helvetica');
                 const englishWidth = doc.getTextWidth(englishText);
                 const centerX = pageWidth / 2;
                 const englishX = centerX - englishWidth / 2 - 5;
                 doc.text(englishText, englishX, y, { ...options, align: 'left' });
                 
-                // Reshape and render Arabic on right
-                const reshapedArabic = arabicReshaper.reshape(arabicText);
-                // Apply bidirectional algorithm for proper display
-                const reversedArabic = bidi.reverseArabic(reshapedArabic);
-                const arabicWidth = doc.getTextWidth(reversedArabic);
+                // Set Arabic font and render
+                doc.setFont('Amiri');
+                // Arabic text is already in correct order for display
+                const arabicWidth = doc.getTextWidth(arabicText);
                 const arabicX = centerX + arabicWidth / 2 + 5;
-                doc.text(reversedArabic, arabicX, y, { ...options, align: 'right' });
+                doc.text(arabicText, arabicX, y, { ...options, align: 'right' });
             } else if (englishText) {
                 // Only English
+                doc.setFont('helvetica');
                 doc.text(englishText, x, y, { ...options, align: 'center' });
             } else if (arabicText) {
                 // Only Arabic
-                const reshapedArabic = arabicReshaper.reshape(arabicText);
-                const reversedArabic = bidi.reverseArabic(reshapedArabic);
-                doc.text(reversedArabic, x, y, { ...options, align: 'center' });
+                doc.setFont('Amiri');
+                doc.text(arabicText, x, y, { ...options, align: 'center' });
             }
         } else if (align === 'right') {
             // Right alignment - render Arabic first (RTL), then English
@@ -102,12 +133,12 @@ function renderArabicText(doc, text, x, y, options = {}) {
             for (let i = parts.length - 1; i >= 0; i--) {
                 const part = parts[i];
                 if (part.isArabic) {
-                    const reshaped = arabicReshaper.reshape(part.text);
-                    const reversed = bidi.reverseArabic(reshaped);
-                    const width = doc.getTextWidth(reversed);
+                    doc.setFont('Amiri');
+                    const width = doc.getTextWidth(part.text);
                     currentX -= width;
-                    doc.text(reversed, currentX, y, { ...options, align: 'left' });
+                    doc.text(part.text, currentX, y, { ...options, align: 'left' });
                 } else {
+                    doc.setFont('helvetica');
                     const width = doc.getTextWidth(part.text);
                     currentX -= width;
                     doc.text(part.text, currentX, y, { ...options, align: 'left' });
@@ -118,11 +149,11 @@ function renderArabicText(doc, text, x, y, options = {}) {
             let currentX = x;
             for (const part of parts) {
                 if (part.isArabic) {
-                    const reshaped = arabicReshaper.reshape(part.text);
-                    const reversed = bidi.reverseArabic(reshaped);
-                    doc.text(reversed, currentX, y, { ...options, align: 'left' });
-                    currentX += doc.getTextWidth(reversed) + 1;
+                    doc.setFont('Amiri');
+                    doc.text(part.text, currentX, y, { ...options, align: 'left' });
+                    currentX += doc.getTextWidth(part.text) + 1;
                 } else {
+                    doc.setFont('helvetica');
                     doc.text(part.text, currentX, y, { ...options, align: 'left' });
                     currentX += doc.getTextWidth(part.text) + 1;
                 }
@@ -132,8 +163,9 @@ function renderArabicText(doc, text, x, y, options = {}) {
         // Restore original font
         doc.setFont(currentFont.fontName, currentFont.fontStyle);
     } catch (error) {
-        console.error('Error rendering Arabic text:', error);
+        console.error('Error rendering bilingual text:', error);
         // Fallback to normal rendering
+        doc.setFont('helvetica');
         doc.text(text, x, y, options);
     }
 }
@@ -756,6 +788,15 @@ Total: ${formatNumber(invoice.total)}`;
             });
 
             try {
+                // Load Arabic font
+                loadArabicFont();
+                
+                // Add Arabic font to document
+                const hasArabicFont = addArabicFontToDoc(doc);
+                if (!hasArabicFont) {
+                    console.warn('Arabic font not loaded. Arabic text may not display correctly.');
+                }
+                
                 // Read and add the logo
                 const logoPath = getResourcePath('logo.png');
                 const logoData = fs.readFileSync(logoPath);
@@ -783,7 +824,7 @@ Total: ${formatNumber(invoice.total)}`;
                 doc.setTextColor(255, 255, 255);
                 doc.setFont('helvetica', 'bold');
                 doc.setFontSize(14);
-                renderArabicText(doc, 'VAT INVOICE / فاتورة ضريبية', doc.internal.pageSize.width / 2, currentY + 7, { align: 'center' });
+                renderBilingualText(doc, 'VAT INVOICE / فاتورة ضريبية', doc.internal.pageSize.width / 2, currentY + 7, { align: 'center' });
                 
                 currentY += 12;
 
@@ -809,7 +850,7 @@ Total: ${formatNumber(invoice.total)}`;
                 
                 // From label (English left, Arabic right)
                 doc.text('From', leftBoxX + 3, leftY);
-                renderArabicText(doc, 'من عنوان', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
+                renderBilingualText(doc, 'من عنوان', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
                 leftY += 5;
 
                 // Company name
@@ -821,7 +862,7 @@ Total: ${formatNumber(invoice.total)}`;
                 // Address label
                 doc.setFont('helvetica', 'bold');
                 doc.text('Address:', leftBoxX + 3, leftY);
-                renderArabicText(doc, 'العنوان', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
+                renderBilingualText(doc, 'العنوان', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
                 leftY += 4;
 
                 // Address details
@@ -836,7 +877,7 @@ Total: ${formatNumber(invoice.total)}`;
                 doc.text('VAT:', leftBoxX + 3, leftY);
                 doc.setFont('helvetica', 'normal');
                 doc.text('311537435500003', leftBoxX + 12, leftY);
-                renderArabicText(doc, 'الرقم الضريبي', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
+                renderBilingualText(doc, 'الرقم الضريبي', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
                 leftY += 4;
 
                 // CR Number
@@ -844,7 +885,7 @@ Total: ${formatNumber(invoice.total)}`;
                 doc.text('CR No:', leftBoxX + 3, leftY);
                 doc.setFont('helvetica', 'normal');
                 doc.text('4701103471', leftBoxX + 15, leftY);
-                renderArabicText(doc, 'السجل التجاري', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
+                renderBilingualText(doc, 'السجل التجاري', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
 
                 // RIGHT BOX - "To" (Customer address from form)
                 doc.setFont('helvetica', 'bold');
@@ -853,7 +894,7 @@ Total: ${formatNumber(invoice.total)}`;
                 
                 // To label (English left, Arabic right)
                 doc.text('To', rightBoxX + 3, rightY);
-                renderArabicText(doc, 'إلى', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
+                renderBilingualText(doc, 'إلى', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
                 rightY += 5;
 
                 // Customer/Company name
@@ -866,7 +907,7 @@ Total: ${formatNumber(invoice.total)}`;
                 if (invoice.address) {
                     doc.setFont('helvetica', 'bold');
                     doc.text('Address:', rightBoxX + 3, rightY);
-                    renderArabicText(doc, 'العنوان', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
+                    renderBilingualText(doc, 'العنوان', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
                     rightY += 4;
 
                     // Address details
@@ -881,7 +922,7 @@ Total: ${formatNumber(invoice.total)}`;
                     doc.text('VAT:', rightBoxX + 3, rightY);
                     doc.setFont('helvetica', 'normal');
                     doc.text(invoice.vatNumber, rightBoxX + 12, rightY);
-                    renderArabicText(doc, 'الرقم الضريبي', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
+                    renderBilingualText(doc, 'الرقم الضريبي', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
                     rightY += 4;
                 }
 
@@ -891,7 +932,7 @@ Total: ${formatNumber(invoice.total)}`;
                     doc.text('CR No:', rightBoxX + 3, rightY);
                     doc.setFont('helvetica', 'normal');
                     doc.text(invoice.crNumber, rightBoxX + 15, rightY);
-                    renderArabicText(doc, 'السجل التجاري', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
+                    renderBilingualText(doc, 'السجل التجاري', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
                 }
 
                 currentY += boxHeight + 5;
@@ -904,7 +945,7 @@ Total: ${formatNumber(invoice.total)}`;
                 doc.setFont('helvetica', 'bold');
                 doc.setFontSize(9);
                 doc.text('Invoice No:', leftBoxX + 3, infoRowY);
-                renderArabicText(doc, 'رقم الفاتورة', leftBoxX + boxWidth - 3, infoRowY, { align: 'right' });
+                renderBilingualText(doc, 'رقم الفاتورة', leftBoxX + boxWidth - 3, infoRowY, { align: 'right' });
                 
                 doc.setFont('helvetica', 'normal');
                 doc.text(invoiceNumber, leftBoxX + 25, infoRowY);
@@ -913,7 +954,7 @@ Total: ${formatNumber(invoice.total)}`;
                 const formattedDate = new Date(invoice.date).toLocaleDateString('en-GB');
                 doc.setFont('helvetica', 'bold');
                 doc.text('Date:', rightBoxX + 3, infoRowY);
-                renderArabicText(doc, 'التاريخ', rightBoxX + boxWidth - 3, infoRowY, { align: 'right' });
+                renderBilingualText(doc, 'التاريخ', rightBoxX + boxWidth - 3, infoRowY, { align: 'right' });
                 
                 doc.setFont('helvetica', 'normal');
                 doc.text(formattedDate, rightBoxX + 20, infoRowY);
