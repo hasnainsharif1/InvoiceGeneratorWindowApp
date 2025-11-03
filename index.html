@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>Invoice Manager</title>
     <link rel="stylesheet" href="styles.css">
@@ -7,14 +8,18 @@
     <style>
         #loadingOverlay {
             position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(255,255,255,0.95);
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.95);
             z-index: 99999;
             display: flex;
             align-items: center;
             justify-content: center;
             transition: opacity 0.3s, visibility 0.3s;
         }
+
         .spinner {
             border: 8px solid rgba(50, 56, 165, 0.1);
             border-top: 8px solid #3238a5;
@@ -23,33 +28,124 @@
             height: 60px;
             animation: spin 1s cubic-bezier(0.68, -0.55, 0.27, 1.55) infinite;
         }
+
         @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
         }
     </style>
 </head>
+
 <body>
-    <div id="loadingOverlay"><div class="spinner"></div></div>
+    <div id="loadingOverlay">
+        <div class="spinner"></div>
+    </div>
     <div class="container">
         <div class="header">
             <h1><i class="fas fa-file-invoice-dollar"></i> RHFCC Invoice Manager</h1>
-            <button onclick="window.location.href='records.html'" class="btn btn-secondary"><i class="fas fa-list"></i> View Invoice Records</button>
+            <button onclick="window.location.href='records.html'" class="btn btn-secondary"><i class="fas fa-list"></i>
+                View Invoice Records</button>
         </div>
-        
+
         <!-- Top Row with 2 columns: Customer and Product -->
         <div class="top-row">
-            <!-- Customer Information -->
-            <div class="section customer-info">
-                <h2><i class="fas fa-user"></i> Customer Information</h2>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="customer">Customer:</label>
-                        <input type="text" id="customer" required placeholder="Enter customer name">
+
+                <!-- Customer Information -->
+                <div class="section customer-info">
+                    <h2><i class="fas fa-user"></i> Invoice Details</h2>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="supplyDate">Supply Date:</label>
+                            <input type="date" id="supplyDate">
+                        </div>
+                        <div class="form-group">
+                            <label for="contractNumber">Contract/PO Number:</label>
+                            <input type="text" id="contractNumber" placeholder="Enter Contract/PO number">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="dueDate">Due Date:</label>
+                            <input type="date" id="dueDate">
+                        </div>
+                        <div class="form-group">
+                            <label for="invoicePeriod">Invoice Period:</label>
+                            <input type="text" id="invoicePeriod" placeholder="Enter Invoice Period">
+                        </div>
                     </div>
                     <div class="form-group">
-                        <label for="mobile">Mobile:</label>
-                        <input type="text" id="mobile" placeholder="Enter mobile number">
+                        <label for="projectNumber">Project/Reference No:</label>
+                        <input type="text" id="projectNumber">
+                    </div>
+                </div>
+
+                <div class="section customer-info">
+
+                    <h2><i class="fas fa-box"></i> Product Information</h2>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="productName">Items Description:</label>
+                            <input type="text" id="productName" placeholder="Enter Description">
+                        </div>
+                        <div class="form-group">
+                            <label for="unit">Unit:</label>
+                            <input type="text" id="unit" placeholder="Enter Unit">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="quantity">Quantity/No:</label>
+                            <input type="number" id="quantity" value="0" min="0" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="unitPrice">Unit Price:</label>
+                            <input type="number" id="unitPrice" value="0" min="0" step="1">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="vatPercent">Vat %:</label>
+                            <input type="text" id="vatPercent" value="15" readonly>
+                        </div>
+                        <div class="form-group">
+                            <label for="vatAmount">Vat Amount:</label>
+                            <input type="text" id="vatAmount" readonly>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="totalAmount">Total Amount:</label>
+                            <input type="text" id="totalAmount" readonly>
+                        </div>
+                        <div class="form-group">
+                            <label for="totalAmountExclVat">Total Amount excl Vat:</label>
+                            <input type="text" id="totalAmountExclVat" readonly>
+                        </div>
+                    </div>
+                    
+                    <div class="button-group">
+                        <button id="btnAdd"><i class="fas fa-plus"></i> Add Item</button>
+                        <button id="btnUpdate"><i class="fas fa-edit"></i> Update</button>
+                        <button id="btnDelete"><i class="fas fa-trash"></i> Delete</button>
+                    </div>
+                </div>
+
+            <!-- Product Entry -->
+            <div class="section">
+                <h2><i class="fas fa-user"></i>To Company Address</h2>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="company">To:</label>
+                        <input type="text" id="company" required placeholder="Enter Company name">
+                    </div>
+                    <div class="form-group">
+                        <label for="address">Address:</label>
+                        <input type="text" id="address" placeholder="Enter Address">
                     </div>
                 </div>
                 <div class="form-row">
@@ -58,42 +154,50 @@
                         <input type="text" id="vat" placeholder="Enter VAT number">
                     </div>
                     <div class="form-group">
-                        <label for="date" >Date:</label>
-                        <input type="datetime-local" id="date">
+                        <label for="crNumber">CR Number:</label>
+                        <input type="text" id="crNumber" placeholder="Enter CR number">
                     </div>
                 </div>
             </div>
 
-            <!-- Product Entry -->
-            <div class="section">
-                <h2><i class="fas fa-box"></i> Product Information</h2>
+            <!-- Summary Section -->
+            <div class="summary">
+                <h2><i class="fas fa-calculator"></i> Summary</h2>
                 <div class="form-row">
                     <div class="form-group">
-                        <label for="productName">Items Description:</label>
-                        <input type="text" id="productName" placeholder="Enter Description">
+                        <label for="subtotal">Subtotal:</label>
+                        <input type="text" id="subtotal" readonly>
                     </div>
                     <div class="form-group">
-                        <label for="productCode">Division:</label>
-                        <input type="text" id="productCode" placeholder="Enter Division">
+                        <label for="tax">VAT (15%):</label>
+                        <input type="text" id="tax" readonly>
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label for="quantity">Total Square Meter:</label>
-                        <input type="number" id="quantity" value="0" min="0" step="0.01">
+                        <label for="total">Total:</label>
+                        <input type="text" id="total" readonly>
                     </div>
                     <div class="form-group">
-                        <label for="unitPrice">Price/Square Meter:</label>
-                        <input type="number" id="unitPrice" value="0" min="0" step="0.01">
+                        <label for="grandTotal">Grand Total:</label>
+                        <input type="text" id="grandTotal" readonly>
                     </div>
                 </div>
-                <div class="button-group">
-                    <button id="btnAdd"><i class="fas fa-plus"></i> Add Item</button>
-                    <button id="btnUpdate"><i class="fas fa-edit"></i> Update</button>
-                    <button id="btnDelete"><i class="fas fa-trash"></i> Delete</button>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="balanceDue">Balance Due:</label>
+                        <input type="text" id="balanceDue" readonly>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <button id="btnGenerate" class="generate-btn"><i class="fas fa-file-pdf"></i> Generate
+                            Invoice</button>
+                    </div>
                 </div>
             </div>
         </div>
+
 
         <!-- Bottom Row with Invoice Items and Summary side by side -->
         <div class="bottom-row">
@@ -105,39 +209,17 @@
                         <thead>
                             <tr>
                                 <th>Items Description</th>
-                                <th>Division</th>
-                                <th>Total Square Meter</th>
-                                <th>Price/Square Meter</th>
-                                <th>Subtotal</th>
+                                <th>Unit</th>
+                                <th>Quantity/No</th>
+                                <th>Unit Price</th>
+                                <th>VAT %</th>
+                                <th>VAT Amount</th>
+                                <th>Total Amount excl VAT</th>
+                                <th>Total Amount</th>
                             </tr>
                         </thead>
                         <tbody></tbody>
                     </table>
-                </div>
-            </div>
-            <!-- Summary Section -->
-            <div class="section summary">
-                <h2><i class="fas fa-calculator"></i> Summary</h2>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="subtotal">Subtotal:</label>
-                        <input type="text" id="subtotal" readonly>
-                    </div>
-                    <div class="form-group">
-                        <label for="tax">Tax (15%):</label>
-                        <input type="text" id="tax" readonly>
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="total">Total:</label>
-                        <input type="text" id="total" readonly>
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <button id="btnGenerate" class="generate-btn"><i class="fas fa-file-pdf"></i> Generate Invoice</button>
-                    </div>
                 </div>
             </div>
         </div>
@@ -145,7 +227,7 @@
 
     <script src="renderer.js" defer></script>
     <script>
-        window.addEventListener('DOMContentLoaded', function() {
+        window.addEventListener('DOMContentLoaded', function () {
             const overlay = document.getElementById('loadingOverlay');
             if (overlay) {
                 setTimeout(() => {
@@ -159,9 +241,10 @@
     </script>
     <div id="simpleModal" class="simple-modal">
         <div class="simple-modal-content">
-          <p id="simpleModalMessage">Please select an item to update</p>
-          <button id="simpleModalOK">OK</button>
+            <p id="simpleModalMessage">Please select an item to update</p>
+            <button id="simpleModalOK">OK</button>
         </div>
-      </div>
+    </div>
 </body>
+
 </html>

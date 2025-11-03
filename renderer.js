@@ -4,10 +4,142 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const remote = require('@electron/remote');
+const arabicReshaper = require('arabic-reshaper');
+const bidi = require('bidi');
+
+// Global variables - Initialize at the top
+let selectedRow = null;
+let items = [];
+let editingFileName = null;
+
+// Helper function to render Arabic text properly in jsPDF
+// Note: jsPDF's default fonts (Helvetica) don't support Arabic characters.
+// For proper Arabic rendering, you need to add an Arabic-supporting font to jsPDF VFS.
+// This function reshapes Arabic text for proper display, but Arabic characters may still
+// appear as boxes/symbols if the font doesn't support them. To fix this:
+// 1. Add an Arabic font (like Noto Sans Arabic or Amiri) to jsPDF VFS
+// 2. Use doc.setFont('arabic-font-name') before rendering Arabic text
+function renderArabicText(doc, text, x, y, options = {}) {
+    try {
+        // Check if text contains Arabic characters
+        const arabicRegex = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+        const hasArabic = arabicRegex.test(text);
+        
+        if (!hasArabic) {
+            // No Arabic text, render normally
+            doc.text(text, x, y, options);
+            return;
+        }
+        
+        // Save current font
+        const currentFont = doc.getFont();
+        
+        // Split text into English and Arabic parts
+        const parts = [];
+        let currentPart = '';
+        let isArabic = false;
+        
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            const charIsArabic = arabicRegex.test(char);
+            
+            if (i === 0) {
+                isArabic = charIsArabic;
+                currentPart = char;
+            } else if (charIsArabic === isArabic) {
+                currentPart += char;
+            } else {
+                if (currentPart.trim()) {
+                    parts.push({ text: currentPart, isArabic: isArabic });
+                }
+                currentPart = char;
+                isArabic = charIsArabic;
+            }
+        }
+        if (currentPart.trim()) {
+            parts.push({ text: currentPart, isArabic: isArabic });
+        }
+        
+        // Handle rendering based on alignment
+        const align = options.align || 'left';
+        const pageWidth = doc.internal.pageSize.width;
+        
+        if (align === 'center') {
+            // For center alignment, split English and Arabic
+            const englishParts = parts.filter(p => !p.isArabic).map(p => p.text);
+            const arabicParts = parts.filter(p => p.isArabic).map(p => p.text);
+            
+            const englishText = englishParts.join('').trim();
+            const arabicText = arabicParts.join('').trim();
+            
+            // Calculate positions
+            if (englishText && arabicText) {
+                // Both English and Arabic - render English on left, Arabic on right
+                const englishWidth = doc.getTextWidth(englishText);
+                const centerX = pageWidth / 2;
+                const englishX = centerX - englishWidth / 2 - 5;
+                doc.text(englishText, englishX, y, { ...options, align: 'left' });
+                
+                // Reshape and render Arabic on right
+                const reshapedArabic = arabicReshaper.reshape(arabicText);
+                // Apply bidirectional algorithm for proper display
+                const reversedArabic = bidi.reverseArabic(reshapedArabic);
+                const arabicWidth = doc.getTextWidth(reversedArabic);
+                const arabicX = centerX + arabicWidth / 2 + 5;
+                doc.text(reversedArabic, arabicX, y, { ...options, align: 'right' });
+            } else if (englishText) {
+                // Only English
+                doc.text(englishText, x, y, { ...options, align: 'center' });
+            } else if (arabicText) {
+                // Only Arabic
+                const reshapedArabic = arabicReshaper.reshape(arabicText);
+                const reversedArabic = bidi.reverseArabic(reshapedArabic);
+                doc.text(reversedArabic, x, y, { ...options, align: 'center' });
+            }
+        } else if (align === 'right') {
+            // Right alignment - render Arabic first (RTL), then English
+            let currentX = x;
+            for (let i = parts.length - 1; i >= 0; i--) {
+                const part = parts[i];
+                if (part.isArabic) {
+                    const reshaped = arabicReshaper.reshape(part.text);
+                    const reversed = bidi.reverseArabic(reshaped);
+                    const width = doc.getTextWidth(reversed);
+                    currentX -= width;
+                    doc.text(reversed, currentX, y, { ...options, align: 'left' });
+                } else {
+                    const width = doc.getTextWidth(part.text);
+                    currentX -= width;
+                    doc.text(part.text, currentX, y, { ...options, align: 'left' });
+                }
+            }
+        } else {
+            // Left alignment - render as is
+            let currentX = x;
+            for (const part of parts) {
+                if (part.isArabic) {
+                    const reshaped = arabicReshaper.reshape(part.text);
+                    const reversed = bidi.reverseArabic(reshaped);
+                    doc.text(reversed, currentX, y, { ...options, align: 'left' });
+                    currentX += doc.getTextWidth(reversed) + 1;
+                } else {
+                    doc.text(part.text, currentX, y, { ...options, align: 'left' });
+                    currentX += doc.getTextWidth(part.text) + 1;
+                }
+            }
+        }
+        
+        // Restore original font
+        doc.setFont(currentFont.fontName, currentFont.fontStyle);
+    } catch (error) {
+        console.error('Error rendering Arabic text:', error);
+        // Fallback to normal rendering
+        doc.text(text, x, y, options);
+    }
+}
 
 // Function to get the correct resource path in both dev and prod
 function getResourcePath(filename) {
-    // If running in development or unpackaged mode
     if (
         process.env.NODE_ENV === 'development' ||
         process.defaultApp ||
@@ -15,7 +147,6 @@ function getResourcePath(filename) {
     ) {
         return path.join(__dirname, filename);
     }
-    // If running as a packaged app
     return path.join(process.resourcesPath, filename);
 }
 
@@ -33,45 +164,186 @@ function readImageFile(filepath) {
     }
 }
 
-// Initialize date field with current date and setup input fields
+// Initialize the invoice form
 document.addEventListener('DOMContentLoaded', () => {
-    // Set initial date with current date and time in datetime-local format
+    initializeInvoiceForm();
+});
+
+function initializeInvoiceForm() {
+    setCurrentDateTime();
+    enableInputFields();
+    setupCalculationListeners();
+    checkForEditMode();
+    calculateProductTotals();
+}
+
+function setCurrentDateTime() {
     const now = new Date();
     const pad = n => n.toString().padStart(2, '0');
-    const currentDateTime = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    document.getElementById('date').value = currentDateTime;
+    const currentDateTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
     
-    // Enable all input fields
-    const inputFields = document.querySelectorAll('input[type="text"], input[type="number"]');
+    const dateInput = document.getElementById('date');
+    if (dateInput) {
+        dateInput.value = currentDateTime;
+    }
+}
+
+function enableInputFields() {
+    const inputFields = document.querySelectorAll('input[type="text"], input[type="number"], input[type="date"]');
+    const readonlyFields = ['subtotal', 'tax', 'total', 'grandTotal', 'balanceDue', 
+                            'vatPercent', 'vatAmount', 'totalAmount', 'totalAmountExclVat'];
+    
     inputFields.forEach(input => {
-        // Only remove readonly from fields that are NOT subtotal, tax, or total
-        if (input && !['subtotal', 'tax', 'total'].includes(input.id)) {
+        if (!readonlyFields.includes(input.id)) {
             input.removeAttribute('readonly');
-            // Clear any existing event listeners
-            input.replaceWith(input.cloneNode(true));
-            // Get the fresh input reference
-            const freshInput = document.getElementById(input.id);
-            if (freshInput) {
-                // Add new event listeners
-                freshInput.addEventListener('focus', (e) => {
-                    e.target.removeAttribute('readonly');
-                });
-                freshInput.addEventListener('blur', (e) => {
-                    if (!e.target.hasAttribute('readonly')) {
-                        e.target.removeAttribute('readonly');
-                    }
-                });
-            }
         }
     });
+}
 
-    // Check for invoice to edit
+function setupCalculationListeners() {
+    const quantityInput = document.getElementById('quantity');
+    const unitPriceInput = document.getElementById('unitPrice');
+    const vatPercentInput = document.getElementById('vatPercent');
+    
+    if (quantityInput) {
+        quantityInput.addEventListener('input', calculateProductTotals);
+        quantityInput.addEventListener('change', calculateProductTotals);
+    }
+    
+    if (unitPriceInput) {
+        unitPriceInput.addEventListener('input', calculateProductTotals);
+        unitPriceInput.addEventListener('change', calculateProductTotals);
+    }
+    
+    if (vatPercentInput) {
+        vatPercentInput.addEventListener('input', calculateProductTotals);
+        vatPercentInput.addEventListener('change', calculateProductTotals);
+    }
+}
+
+function calculateProductTotals() {
+    const quantityInput = document.getElementById('quantity');
+    const unitPriceInput = document.getElementById('unitPrice');
+    const vatPercentInput = document.getElementById('vatPercent');
+    const vatAmountInput = document.getElementById('vatAmount');
+    const totalAmountInput = document.getElementById('totalAmount');
+    const totalAmountExclVatInput = document.getElementById('totalAmountExclVat');
+    
+    if (!quantityInput || !unitPriceInput) {
+        console.warn('Required input fields not found');
+        return;
+    }
+    
+    const quantity = parseFloat(quantityInput.value) || 0;
+    const unitPrice = parseFloat(unitPriceInput.value) || 0;
+    const vatPercent = parseFloat(vatPercentInput?.value) || 15;
+    
+    const totalExclVat = quantity * unitPrice;
+    const vatAmount = (totalExclVat * vatPercent) / 100;
+    const totalInclVat = totalExclVat + vatAmount;
+    
+    if (totalAmountExclVatInput) totalAmountExclVatInput.value = formatNumber(totalExclVat);
+    if (vatAmountInput) vatAmountInput.value = formatNumber(vatAmount);
+    if (totalAmountInput) totalAmountInput.value = formatNumber(totalInclVat);
+    
+    updateInvoiceSummary();
+}
+
+// Alias for backward compatibility
+const calculateTotals = calculateProductTotals;
+
+function updateInvoiceSummary() {
+    let subtotal = 0;
+    
+    if (items && items.length > 0) {
+        subtotal = items.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
+    } else {
+        const quantity = parseFloat(document.getElementById('quantity')?.value) || 0;
+        const unitPrice = parseFloat(document.getElementById('unitPrice')?.value) || 0;
+        subtotal = quantity * unitPrice;
+    }
+    
+    const tax = subtotal * 0.15;
+    const total = subtotal + tax;
+    
+    const subtotalEl = document.getElementById('subtotal');
+    const taxEl = document.getElementById('tax');
+    const totalEl = document.getElementById('total');
+    const grandTotalEl = document.getElementById('grandTotal');
+    const balanceDueEl = document.getElementById('balanceDue');
+    
+    if (subtotalEl) subtotalEl.value = formatCurrency(subtotal);
+    if (taxEl) taxEl.value = formatCurrency(tax);
+    if (totalEl) totalEl.value = formatCurrency(total);
+    if (grandTotalEl) grandTotalEl.value = formatCurrency(total);
+    if (balanceDueEl) balanceDueEl.value = formatCurrency(total);
+}
+
+// Alias for backward compatibility
+const updateSummary = updateInvoiceSummary;
+
+function getItemsFromTable() {
+    const items = [];
+    const tbody = document.querySelector('#itemsTable tbody');
+    
+    if (!tbody) return items;
+    
+    const rows = tbody.getElementsByTagName('tr');
+    
+    for (let i = 0; i < rows.length; i++) {
+        const cells = rows[i].getElementsByTagName('td');
+        if (cells.length >= 8) {
+            items.push({
+                productName: cells[0].textContent.trim(),
+                unit: cells[1].textContent.trim(),
+                quantity: parseFloat(cells[2].textContent.trim()) || 0,
+                unitPrice: parseFloat(cells[3].textContent.trim()) || 0,
+                vatPercent: parseFloat(cells[4].textContent.replace('%', '').trim()) || 15,
+                vatAmount: parseFloat(cells[5].textContent.trim()) || 0,
+                totalAmountExclVat: parseFloat(cells[6].textContent.trim()) || 0,
+                totalAmount: parseFloat(cells[7].textContent.trim()) || 0,
+                subtotal: parseFloat(cells[6].textContent.trim()) || 0
+            });
+        }
+    }
+    
+    return items;
+}
+
+function formatNumber(number) {
+    return Number(number).toFixed(2);
+}
+
+function formatCurrency(number) {
+    return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'SAR',
+        currencyDisplay: 'code',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    }).format(number).replace('SAR', 'SAR ');
+}
+
+function clearProductInputs() {
+    const fields = ['productName', 'unit', 'quantity', 'unitPrice'];
+    
+    fields.forEach(fieldId => {
+        const input = document.getElementById(fieldId);
+        if (input) {
+            input.value = fieldId === 'quantity' || fieldId === 'unitPrice' ? '0' : '';
+        }
+    });
+    
+    selectedRow = null;
+    calculateProductTotals();
+}
+
+function checkForEditMode() {
     const editInvoiceData = localStorage.getItem('editInvoice');
     if (editInvoiceData) {
         try {
             const invoice = JSON.parse(editInvoiceData);
             loadInvoiceForEdit(invoice);
-            // Store the fileName for update
             if (invoice.fileName) {
                 editingFileName = invoice.fileName;
             }
@@ -80,117 +352,192 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error loading invoice for editing:', error);
         }
     }
-});
-
-// Function to load invoice for editing
-function loadInvoiceForEdit(invoice) {
-    document.getElementById('customer').value = invoice.customerName;
-    document.getElementById('mobile').value = invoice.mobile;
-    document.getElementById('vat').value = invoice.vatNumber;
-    document.getElementById('date').value = invoice.date;
-
-    items = Array.isArray(invoice.items) ? invoice.items : [];
-    const tbody = document.getElementById('itemsTable').getElementsByTagName('tbody')[0];
-    tbody.innerHTML = '';
-    
-    items.forEach(item => {
-        const row = tbody.insertRow();
-        row.innerHTML = `
-            <td>${item.productName || item.name || ''}</td>
-            <td>${item.productCode || item.code || ''}</td>
-            <td>${formatNumber(item.quantity)} m</td>
-            <td>${formatNumber(item.unitPrice)}</td>
-            <td>${formatNumber(item.subtotal)}</td>
-        `;
-
-        row.addEventListener('click', () => {
-            selectedRow = row;
-            const index = selectedRow.rowIndex - 1;
-            const selectedItem = items[index];
-            document.getElementById('productName').value = selectedItem.productName || selectedItem.name || '';
-            document.getElementById('productCode').value = selectedItem.productCode || selectedItem.code || '';
-            document.getElementById('quantity').value = selectedItem.quantity;
-            document.getElementById('unitPrice').value = selectedItem.unitPrice;
-        });
-    });
-
-    updateSummary();
-    ensureInputsEditable();
 }
 
-// Global variables
-let selectedRow = null;
-let items = [];
-let editingFileName = null;
+function loadInvoiceForEdit(invoice) {
+    const companyInput = document.getElementById('company');
+    const addressInput = document.getElementById('address');
+    const vatInput = document.getElementById('vat');
+    const crNumberInput = document.getElementById('crNumber');
+    const supplyDateInput = document.getElementById('supplyDate');
+    const dueDateInput = document.getElementById('dueDate');
+    const contractNumberInput = document.getElementById('contractNumber');
+    const invoicePeriodInput = document.getElementById('invoicePeriod');
+    const projectNumberInput = document.getElementById('projectNumber');
+    
+    if (companyInput) companyInput.value = invoice.customerName || invoice.company || '';
+    if (addressInput) addressInput.value = invoice.address || '';
+    if (vatInput) vatInput.value = invoice.vatNumber || '';
+    if (crNumberInput) crNumberInput.value = invoice.crNumber || '';
+    if (supplyDateInput) supplyDateInput.value = invoice.supplyDate || '';
+    if (dueDateInput) dueDateInput.value = invoice.dueDate || '';
+    if (contractNumberInput) contractNumberInput.value = invoice.contractNumber || '';
+    if (invoicePeriodInput) invoicePeriodInput.value = invoice.invoicePeriod || '';
+    if (projectNumberInput) projectNumberInput.value = invoice.projectNumber || '';
+    
+    if (invoice.items && Array.isArray(invoice.items)) {
+        const tbody = document.querySelector('#itemsTable tbody');
+        if (tbody) {
+            tbody.innerHTML = '';
+            
+            items = invoice.items.map(item => {
+                const productName = item.productName || item.name || '';
+                const unit = item.unit || item.productCode || item.code || '';
+                const quantity = item.quantity || 0;
+                const unitPrice = item.unitPrice || 0;
+                const vatPercent = item.vatPercent || 15;
+                const totalAmountExclVat = item.totalAmountExclVat || item.subtotal || (quantity * unitPrice);
+                const vatAmount = item.vatAmount || (totalAmountExclVat * vatPercent / 100);
+                const totalAmount = item.totalAmount || (totalAmountExclVat + vatAmount);
+                
+                const row = tbody.insertRow();
+                row.innerHTML = `
+                    <td>${productName}</td>
+                    <td>${unit}</td>
+                    <td>${formatNumber(quantity)}</td>
+                    <td>${formatNumber(unitPrice)}</td>
+                    <td>${formatNumber(vatPercent)}%</td>
+                    <td>${formatNumber(vatAmount)}</td>
+                    <td>${formatNumber(totalAmountExclVat)}</td>
+                    <td>${formatNumber(totalAmount)}</td>
+                `;
+                
+                row.addEventListener('click', () => {
+                    selectedRow = row;
+                    document.getElementById('productName').value = productName;
+                    document.getElementById('unit').value = unit;
+                    document.getElementById('quantity').value = quantity;
+                    document.getElementById('unitPrice').value = unitPrice;
+                    calculateProductTotals();
+                });
+                
+                return {
+                    productName,
+                    unit,
+                    quantity,
+                    unitPrice,
+                    vatPercent,
+                    vatAmount,
+                    totalAmountExclVat,
+                    totalAmount,
+                    subtotal: totalAmountExclVat
+                };
+            });
+        }
+    }
+    
+    updateInvoiceSummary();
+}
 
-// Helper function to format currency
-const formatCurrency = (number) => {
-    return new Intl.NumberFormat('en-US', {
-        style: 'currency',
-        currency: 'SAR',
-        currencyDisplay: 'code',
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-    }).format(number).replace('SAR', 'SAR ');
-};
-
-// Helper function to format number with 2 decimal places
-const formatNumber = (number) => {
-    return Number(number).toFixed(2);
-};
-
-// Update summary calculations
-const updateSummary = () => {
-    const subtotal = items.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
-    const tax = subtotal * 0.15;
-    const total = subtotal + tax;
-
-    document.getElementById('subtotal').value = formatCurrency(subtotal);
-    document.getElementById('tax').value = formatCurrency(tax);
-    document.getElementById('total').value = formatCurrency(total);
-};
-
-// Clear product input fields
-const clearProductInputs = () => {
-    document.getElementById('productName').value = '';
-    document.getElementById('productCode').value = '';
-    document.getElementById('quantity').value = '0';
-    document.getElementById('unitPrice').value = '0';
-    selectedRow = null;
-};
-
-// Add item to table
-const addButton = document.getElementById('btnAdd');
+// Simple Modal functions
 const simpleModal = document.getElementById('simpleModal');
 const simpleModalMessage = document.getElementById('simpleModalMessage');
 const simpleModalOK = document.getElementById('simpleModalOK');
 
+function showSimpleModal(message) {
+    simpleModalMessage.textContent = message;
+    simpleModal.style.display = "flex";
+}
+
+function hideSimpleModal() {
+    simpleModal.style.display = "none";
+}
+
+if (simpleModalOK) {
+    simpleModalOK.addEventListener('click', hideSimpleModal);
+}
+
+if (simpleModal) {
+    simpleModal.addEventListener('click', function(e) {
+        if (e.target === this) {
+            hideSimpleModal();
+        }
+    });
+}
+
+function showAlert(message) {
+    let dialogOverlay = document.getElementById('dialogOverlay');
+    if (!dialogOverlay) {
+        dialogOverlay = document.createElement('div');
+        dialogOverlay.id = 'dialogOverlay';
+        dialogOverlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+        document.body.appendChild(dialogOverlay);
+    }
+
+    const dialog = document.createElement('div');
+    dialog.className = 'custom-dialog';
+    dialog.style.cssText = 'background:white;padding:20px;border-radius:8px;max-width:400px;';
+    dialog.innerHTML = `
+        <div class="dialog-content">
+            <p style="margin:0 0 15px 0;">${message}</p>
+            <button style="padding:8px 20px;background:#3238a5;color:white;border:none;border-radius:4px;cursor:pointer;" onclick="this.parentElement.parentElement.remove();document.getElementById('dialogOverlay').style.display='none';">OK</button>
+        </div>
+    `;
+    
+    dialogOverlay.style.display = 'flex';
+    dialogOverlay.innerHTML = '';
+    dialogOverlay.appendChild(dialog);
+
+    const okButton = dialog.querySelector('button');
+    okButton.focus();
+    
+    const closeHandler = (e) => {
+        if (e.key === 'Enter' || e.key === 'Escape') {
+            dialog.remove();
+            dialogOverlay.style.display = 'none';
+            document.removeEventListener('keydown', closeHandler);
+        }
+    };
+    document.addEventListener('keydown', closeHandler);
+}
+
+function ensureInputsEditable() {
+    const inputFields = document.querySelectorAll('input[type="text"], input[type="number"], input[type="date"]');
+    inputFields.forEach(input => {
+        if (input && !['subtotal', 'tax', 'total', 'grandTotal', 'balanceDue', 'vatPercent', 'vatAmount', 'totalAmount', 'totalAmountExclVat'].includes(input.id)) {
+            input.removeAttribute('readonly');
+            input.style.backgroundColor = '#fff';
+            input.style.cursor = 'text';
+            input.style.pointerEvents = 'auto';
+        }
+    });
+}
+
+// Add item to table
+const addButton = document.getElementById('btnAdd');
 if (addButton) {
     addButton.addEventListener('click', () => {
         try {
             const productNameInput = document.getElementById('productName');
-            const productCodeInput = document.getElementById('productCode');
+            const unitInput = document.getElementById('unit');
             const quantityInput = document.getElementById('quantity');
             const unitPriceInput = document.getElementById('unitPrice');
-            const itemsTableBody = document.getElementById('itemsTable').getElementsByTagName('tbody')[0];
+            const vatPercentInput = document.getElementById('vatPercent');
+            const vatAmountInput = document.getElementById('vatAmount');
+            const totalAmountExclVatInput = document.getElementById('totalAmountExclVat');
+            const totalAmountInput = document.getElementById('totalAmount');
+            const itemsTableBody = document.getElementById('itemsTable')?.getElementsByTagName('tbody')[0];
 
-            if (!productNameInput || !productCodeInput || !quantityInput || !unitPriceInput || !itemsTableBody) {
+            if (!productNameInput || !unitInput || !quantityInput || !unitPriceInput || !itemsTableBody) {
                 showSimpleModal("System error: Form elements missing");
                 return;
             }
 
             const productName = productNameInput.value.trim();
-            const productCode = productCodeInput.value.trim();
+            const unit = unitInput.value.trim();
             const quantity = parseFloat(quantityInput.value);
             const unitPrice = parseFloat(unitPriceInput.value);
+            const vatPercent = parseFloat(vatPercentInput?.value || '15') || 15;
+            const totalAmountExclVat = parseFloat(totalAmountExclVatInput?.value || '0') || 0;
+            const vatAmount = parseFloat(vatAmountInput?.value || '0') || 0;
+            const totalAmount = parseFloat(totalAmountInput?.value || '0') || 0;
 
-            // Validate inputs with specific error messages
             if (!productName) {
-                showSimpleModal("Please enter a product name");
+                showSimpleModal("Please enter an items description");
                 return;
             }
-            if (!productCode) {
-                showSimpleModal("Please enter a product code");
+            if (!unit) {
+                showSimpleModal("Please enter a unit");
                 return;
             }
             if (isNaN(quantity) || quantity <= 0) {
@@ -202,606 +549,655 @@ if (addButton) {
                 return;
             }
 
-            // Rest of your existing code...
             const item = {
                 productName,
-                productCode,
+                unit,
                 quantity,
                 unitPrice,
-                subtotal: quantity * unitPrice
+                vatPercent,
+                vatAmount,
+                totalAmountExclVat,
+                totalAmount,
+                subtotal: totalAmountExclVat
             };
 
             items.push(item);
             
             const row = itemsTableBody.insertRow();
-            
             row.innerHTML = `
                 <td>${item.productName}</td>
-                <td>${item.productCode}</td>
-                <td>${formatNumber(item.quantity)} m</td>
+                <td>${item.unit}</td>
+                <td>${formatNumber(item.quantity)}</td>
                 <td>${formatNumber(item.unitPrice)}</td>
-                <td>${formatNumber(item.subtotal)}</td>
+                <td>${formatNumber(item.vatPercent)}%</td>
+                <td>${formatNumber(item.vatAmount)}</td>
+                <td>${formatNumber(item.totalAmountExclVat)}</td>
+                <td>${formatNumber(item.totalAmount)}</td>
             `;
 
             row.addEventListener('click', () => {
                 selectedRow = row;
                 const index = selectedRow.rowIndex - 1;
-                const item = items[index];
+                const selectedItem = items[index];
                 
-                productNameInput.value = item.productName;
-                productCodeInput.value = item.productCode;
-                quantityInput.value = item.quantity;
-                unitPriceInput.value = item.unitPrice;
+                productNameInput.value = selectedItem.productName || '';
+                unitInput.value = selectedItem.unit || '';
+                quantityInput.value = selectedItem.quantity || 0;
+                unitPriceInput.value = selectedItem.unitPrice || 0;
+                
+                calculateProductTotals();
             });
 
             clearProductInputs();
-            updateSummary();
+            updateInvoiceSummary();
         } catch (error) {
             console.error('Error adding item:', error);
-            showSimpleModal("An unexpected error occurred");
-        }
-    });
-}
-
-// Simple Modal functions
-function showSimpleModal(message) {
-    simpleModalMessage.textContent = message;
-    simpleModal.style.display = "flex";
-}
-
-function hideSimpleModal() {
-    simpleModal.style.display = "none";
-}
-
-// Setup OK button
-simpleModalOK.addEventListener('click', hideSimpleModal);
-
-// Close when clicking outside modal
-simpleModal.addEventListener('click', function(e) {
-    if (e.target === this) {
-        hideSimpleModal();
-    }
-});
-
-// Custom alert function to replace window.alert
-function showAlert(message) {
-    // Create a dialog div if it doesn't exist
-    let dialogOverlay = document.getElementById('dialogOverlay');
-    if (!dialogOverlay) {
-        dialogOverlay = document.createElement('div');
-        dialogOverlay.id = 'dialogOverlay';
-        document.body.appendChild(dialogOverlay);
-    }
-
-    const dialog = document.createElement('div');
-    dialog.className = 'custom-dialog';
-    dialog.innerHTML = `
-        <div class="dialog-content">
-            <p>${message}</p>
-            <button onclick="this.parentElement.parentElement.remove();document.getElementById('dialogOverlay').style.display='none';">OK</button>
-        </div>
-    `;
-    
-    dialogOverlay.style.display = 'block';
-    dialogOverlay.appendChild(dialog);
-
-    // Focus handling
-    const okButton = dialog.querySelector('button');
-    okButton.focus();
-    
-    // Remove dialog on Enter or Escape
-    document.addEventListener('keydown', function closeOnKey(e) {
-        if (e.key === 'Enter' || e.key === 'Escape') {
-            dialog.remove();
-            dialogOverlay.style.display = 'none';
-            document.removeEventListener('keydown', closeOnKey);
-        }
-    });
-}
-
-// Function to ensure all input fields are editable
-function ensureInputsEditable() {
-    const inputFields = document.querySelectorAll('input[type="text"], input[type="number"]');
-    inputFields.forEach(input => {
-        if (input && !['subtotal', 'tax', 'total'].includes(input.id)) {
-            input.removeAttribute('readonly');
-            input.style.backgroundColor = '#fff';
-            input.style.cursor = 'text';
-            input.style.pointerEvents = 'auto';
+            showSimpleModal("An unexpected error occurred: " + error.message);
         }
     });
 }
 
 // Update selected item
-document.getElementById('btnUpdate').addEventListener('click', () => {
-    if (!selectedRow) {
-        showAlert('Please select an item to update');
+const updateButton = document.getElementById('btnUpdate');
+if (updateButton) {
+    updateButton.addEventListener('click', () => {
+        if (!selectedRow) {
+            showAlert('Please select an item to update');
+            ensureInputsEditable();
+            return;
+        }
+
+        const index = selectedRow.rowIndex - 1;
+        const productNameInput = document.getElementById('productName');
+        const unitInput = document.getElementById('unit');
+        const quantityInput = document.getElementById('quantity');
+        const unitPriceInput = document.getElementById('unitPrice');
+        const vatPercentInput = document.getElementById('vatPercent');
+        const vatAmountInput = document.getElementById('vatAmount');
+        const totalAmountExclVatInput = document.getElementById('totalAmountExclVat');
+        const totalAmountInput = document.getElementById('totalAmount');
+
+        const item = {
+            productName: productNameInput.value,
+            unit: unitInput.value,
+            quantity: parseFloat(quantityInput.value),
+            unitPrice: parseFloat(unitPriceInput.value),
+            vatPercent: parseFloat(vatPercentInput?.value || '15') || 15,
+            vatAmount: parseFloat(vatAmountInput?.value || '0') || 0,
+            totalAmountExclVat: parseFloat(totalAmountExclVatInput?.value || '0') || 0,
+            totalAmount: parseFloat(totalAmountInput?.value || '0') || 0,
+            subtotal: parseFloat(totalAmountExclVatInput?.value || '0') || 0
+        };
+
+        items[index] = item;
+        
+        selectedRow.innerHTML = `
+            <td>${item.productName}</td>
+            <td>${item.unit}</td>
+            <td>${formatNumber(item.quantity)}</td>
+            <td>${formatNumber(item.unitPrice)}</td>
+            <td>${formatNumber(item.vatPercent)}%</td>
+            <td>${formatNumber(item.vatAmount)}</td>
+            <td>${formatNumber(item.totalAmountExclVat)}</td>
+            <td>${formatNumber(item.totalAmount)}</td>
+        `;
+
+        clearProductInputs();
+        updateInvoiceSummary();
         ensureInputsEditable();
-        return;
-    }
-
-    const index = selectedRow.rowIndex - 1;
-    const item = {
-        productName: document.getElementById('productName').value,
-        productCode: document.getElementById('productCode').value,
-        quantity: parseFloat(document.getElementById('quantity').value),
-        unitPrice: parseFloat(document.getElementById('unitPrice').value),
-        subtotal: parseFloat(document.getElementById('quantity').value) * parseFloat(document.getElementById('unitPrice').value)
-    };
-
-    items[index] = item;
-    
-    selectedRow.innerHTML = `
-        <td>${item.productName}</td>
-        <td>${item.productCode}</td>
-        <td>${formatNumber(item.quantity)} m</td>
-        <td>${formatNumber(item.unitPrice)}</td>
-        <td>${formatNumber(item.subtotal)}</td>
-    `;
-
-    clearProductInputs();
-    updateSummary();
-    ensureInputsEditable();
-});
+    });
+}
 
 // Delete selected item
-document.getElementById('btnDelete').addEventListener('click', () => {
-    if (!selectedRow) {
-        showAlert('Please select an item to delete');
+const deleteButton = document.getElementById('btnDelete');
+if (deleteButton) {
+    deleteButton.addEventListener('click', () => {
+        if (!selectedRow) {
+            showAlert('Please select an item to delete');
+            ensureInputsEditable();
+            return;
+        }
+
+        const index = selectedRow.rowIndex - 1;
+        items.splice(index, 1);
+        selectedRow.parentNode.removeChild(selectedRow);
+        clearProductInputs();
+        updateInvoiceSummary();
         ensureInputsEditable();
-        return;
-    }
+    });
+}
 
-    const index = selectedRow.rowIndex - 1;
-    items.splice(index, 1);
-    selectedRow.parentNode.removeChild(selectedRow);
-    clearProductInputs();
-    updateSummary();
-    ensureInputsEditable();
-});
-
-// Function to clear form and reset fields
 function clearForm() {
-    // Get all input fields
-    const inputFields = document.querySelectorAll('input[type="text"], input[type="number"]');
+    const inputFields = document.querySelectorAll('input[type="text"], input[type="number"], input[type="date"]');
     
-    // Clear and reset each input field
     inputFields.forEach(input => {
         if (input) {
-            // Remove readonly attribute
             input.removeAttribute('readonly');
             
-            // Reset value based on input type
             if (input.type === 'number') {
                 input.value = '0';
-            } else if (input.id === 'date') {
-                input.valueAsDate = new Date();
+            } else if (input.type === 'date') {
+                input.value = '';
             } else {
                 input.value = '';
             }
         }
     });
 
-    // Clear items array and table
     items = [];
     clearItemsTable();
-
-    // Reset selected row
     selectedRow = null;
+    calculateProductTotals();
 }
 
-// Function to clear items table
 function clearItemsTable() {
-    const tbody = document.getElementById('itemsTable').getElementsByTagName('tbody')[0];
+    const tbody = document.getElementById('itemsTable')?.getElementsByTagName('tbody')[0];
     if (tbody) {
         tbody.innerHTML = '';
     }
 }
 
 // Generate Invoice
-document.getElementById('btnGenerate').addEventListener('click', async () => {
-    try {
-        const customerName = document.getElementById('customer').value;
-        if (!customerName || items.length === 0) {
-            showAlert('Please add customer information and at least one item');
-            ensureInputsEditable();
-            return;
-        }
+const generateButton = document.getElementById('btnGenerate');
+if (generateButton) {
+    generateButton.addEventListener('click', async () => {
+        try {
+            const companyName = document.getElementById('company')?.value;
+            if (!companyName || items.length === 0) {
+                showAlert('Please add company information and at least one item');
+                ensureInputsEditable();
+                return;
+            }
 
-        // Create invoice object
-        const invoice = {
-            customerName,
-            mobile: document.getElementById('mobile').value,
-            vatNumber: document.getElementById('vat').value,
-            date: document.getElementById('date').value,
-            items,
-            subtotal: parseFloat(document.getElementById('subtotal').value.replace(/[^0-9.-]+/g, '')),
-            tax: parseFloat(document.getElementById('tax').value.replace(/[^0-9.-]+/g, '')),
-            total: parseFloat(document.getElementById('total').value.replace(/[^0-9.-]+/g, ''))
-        };
-        if (editingFileName) {
-            invoice.fileName = editingFileName;
-        }
+            // Create invoice object with all fields
+            const invoice = {
+                customerName: companyName,
+                company: companyName,
+                address: document.getElementById('address')?.value || '',
+                vatNumber: document.getElementById('vat')?.value || '',
+                crNumber: document.getElementById('crNumber')?.value || '',
+                supplyDate: document.getElementById('supplyDate')?.value || '',
+                dueDate: document.getElementById('dueDate')?.value || '',
+                contractNumber: document.getElementById('contractNumber')?.value || '',
+                invoicePeriod: document.getElementById('invoicePeriod')?.value || '',
+                projectNumber: document.getElementById('projectNumber')?.value || '',
+                date: new Date().toISOString(),
+                items: items,
+                subtotal: parseFloat(document.getElementById('subtotal')?.value.replace(/[^0-9.-]+/g, '') || '0'),
+                tax: parseFloat(document.getElementById('tax')?.value.replace(/[^0-9.-]+/g, '') || '0'),
+                total: parseFloat(document.getElementById('total')?.value.replace(/[^0-9.-]+/g, '') || '0')
+            };
 
-        // Generate random invoice number (4 digits)
-        const invoiceNumber = String(Math.floor(1000 + Math.random() * 9000));
+            if (editingFileName) {
+                invoice.fileName = editingFileName;
+            }
 
-        // Generate QR code with minimal essential data only
-        const qrData = `Invoice: ${invoiceNumber}
+            // Generate random invoice number (4 digits)
+            const invoiceNumber = String(Math.floor(1000 + Math.random() * 9000));
+
+            // Generate QR code with minimal essential data
+            const qrData = `Invoice: ${invoiceNumber}
 Date: ${new Date(invoice.date).toLocaleDateString()}
 Customer: ${invoice.customerName}
 Total: ${formatNumber(invoice.total)}`;
 
-        const qrCanvas = await QRCode.toCanvas(qrData, {
-            errorCorrectionLevel: 'M',
-            margin: 1,
-            width: 150
-        });
-        const qrImage = qrCanvas.toDataURL('image/png');
+            const qrCanvas = await QRCode.toCanvas(qrData, {
+                errorCorrectionLevel: 'M',
+                margin: 1,
+                width: 150
+            });
+            const qrImage = qrCanvas.toDataURL('image/png');
 
-        // Generate PDF
-        const doc = new jsPDF({
-            orientation: 'portrait',
-            unit: 'mm',
-            format: 'a4'
-        });
-
-        try {
-            // Read and add the logo
-            const logoPath = getResourcePath('logo.png');
-            const logoData = fs.readFileSync(logoPath);
-            const logoBase64 = Buffer.from(logoData).toString('base64');
-            
-            // Add company logo and header
-            const pageCenter = doc.internal.pageSize.width / 2;
-            const logoHeight = 50; // Increased height for better visibility
-            const fullPageWidth = doc.internal.pageSize.width;
-            const pageWidth = fullPageWidth - 30;
-            
-            // Add logo with full width (no margins)
-            doc.addImage('data:image/png;base64,' + logoBase64, 'PNG', 0, 10, fullPageWidth, logoHeight);
-
-            // Reset text color and font for the rest of the invoice
-            doc.setTextColor(0, 0, 0);
-            doc.setFont('helvetica', 'normal');
-            doc.setFontSize(11);
-
-            // After drawing the logo and header lines...
-            const headerBottomY = 50; // move everything further down
-            const contentStartY = headerBottomY + 12; // more space below logo/header
-
-            // Title and Date
-            doc.setFontSize(26);
-            doc.setFont('helvetica', 'bold');
-            doc.text('Invoice', doc.internal.pageSize.width / 2, contentStartY, { align: 'center' });
-
-            // Add date near the title with bold "Date:" label
-            doc.setFontSize(10);
-            const formattedDate = new Date(invoice.date).toLocaleString('en-GB', {
-                hour: '2-digit',
-                minute: '2-digit',
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit'
-            }).replace(',', '');
-
-            // Make "Date:" bold
-            doc.setFont('helvetica', 'bold');
-            doc.text('Date:', doc.internal.pageSize.width - 60, contentStartY);
-
-            // Make the actual date value normal weight
-            doc.setFont('helvetica', 'normal');
-            doc.text(formattedDate, doc.internal.pageSize.width - 60 + 15, contentStartY);
-
-            // Invoice details and QR code
-            const detailsStartY = contentStartY + 8;
-            const leftColX = 15;
-            const labelWidth = 35; // Fixed width for all labels to ensure consistent alignment
-            const valueStartX = leftColX + labelWidth; // All values start from this position
-            const rightColX = doc.internal.pageSize.width - 60; // QR code right margin
-            const rowSpacing = 7;
-            let detailY = detailsStartY;
-
-            // QR code (right side)
-            const qrWidth = 38;
-            const qrY = detailsStartY;
-            doc.addImage(qrImage, 'PNG', rightColX, qrY, qrWidth, qrWidth);
-
-            // Details (left stack) - All values aligned at same position
-            doc.setFontSize(10);
-
-            // Invoice Number
-            doc.setFont('helvetica', 'bold');
-            doc.text('Invoice No:', leftColX, detailY);
-            doc.setFont('helvetica', 'normal');
-            doc.text(invoiceNumber, valueStartX, detailY);
-            detailY += rowSpacing;
-
-            // Customer Name
-            doc.setFont('helvetica', 'bold');
-            doc.text('Customer:', leftColX, detailY);
-            doc.setFont('helvetica', 'normal');
-            doc.text(invoice.customerName, valueStartX, detailY);
-            detailY += rowSpacing;
-
-            // Mobile
-            doc.setFont('helvetica', 'bold');
-            doc.text('Mobile:', leftColX, detailY);
-            doc.setFont('helvetica', 'normal');
-            doc.text(invoice.mobile, valueStartX, detailY);
-            detailY += rowSpacing;
-
-            // VAT Number
-            doc.setFont('helvetica', 'bold');
-            doc.text('Customer VAT:', leftColX, detailY);
-            doc.setFont('helvetica', 'normal');
-            doc.text(invoice.vatNumber, valueStartX, detailY);
-            detailY += rowSpacing;
-
-            // Bank Name
-            doc.setFont('helvetica', 'bold');
-            doc.text('Bank Name:', leftColX, detailY);
-            doc.setFont('helvetica', 'normal');
-            doc.text('Alrajhi Bank', valueStartX, detailY);
-            detailY += rowSpacing;
-
-            // Account Title
-            doc.setFont('helvetica', 'bold');
-            doc.text('Account Title:', leftColX, detailY);
-            doc.setFont('helvetica', 'normal');
-            doc.text('Rakan Hussein Al-Fatih Contracting Company', valueStartX, detailY);
-            detailY += rowSpacing;
-
-            // IBAN
-            doc.setFont('helvetica', 'bold');
-            doc.text('IBAN:', leftColX, detailY);
-            doc.setFont('helvetica', 'normal');
-            doc.text('SA6280000146608016555919', valueStartX, detailY);
-            detailY += rowSpacing + 5;
-
-            // Table position (start after details)
-            let startY = detailY + 10;
-            let startX = 15;
-            const tableWidth = doc.internal.pageSize.width - 30;
-
-            // Table column widths (sum to tableWidth)
-            const colWidths = [
-                tableWidth * 0.22, // Name
-                tableWidth * 0.18, // Designation
-                tableWidth * 0.18, // Total Hours
-                tableWidth * 0.18, // Price/Hour
-                tableWidth * 0.24  // Subtotal
-            ];
-
-            // Table headers
-            doc.setFont('helvetica', 'bold');
-            doc.setFontSize(10);
-            doc.text('Items Description', startX + 2, startY + 6, { maxWidth: colWidths[0] - 4 });
-            doc.text('Division', startX + colWidths[0] + 2, startY + 6, { maxWidth: colWidths[1] - 4 });
-            doc.text('Square Meters', startX + colWidths[0] + colWidths[1] + 2, startY + 6, { maxWidth: colWidths[2] - 4 });
-            doc.text('Price/Sq Meter', startX + colWidths[0] + colWidths[1] + colWidths[2] + 2, startY + 6, { maxWidth: colWidths[3] - 4 });
-            doc.text('Amount', startX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + 2, startY + 6, { maxWidth: colWidths[4] - 4 });
-
-            // Table content with word wrapping and truncation
-            doc.setFont('helvetica', 'normal');
-            doc.setFontSize(9);
-            let currentY = startY + 8;
-            const pageHeight = doc.internal.pageSize.height;
-            const footerHeight = 60; // Height reserved for footer
-            const maxContentHeight = pageHeight - footerHeight;
-            let isFirstPage = true;
-
-            items.forEach((item, index) => {
-                // Calculate row height before drawing
-                const wrapText = (text, width) => {
-                    let lines = doc.splitTextToSize(text, width - 4);
-                    if (lines.length > 2) {
-                        lines = [lines[0], lines[1].slice(0, width/2) + '...'];
-                    }
-                    return lines;
-                };
-                
-                const nameLines = wrapText(item.productName || item.name || '', colWidths[0]);
-                const designationLines = wrapText(item.productCode || item.code || '', colWidths[1]);
-                const rowHeight = Math.max(8, nameLines.length * 7, designationLines.length * 7);
-
-                // Check if we need a new page
-                if (currentY + rowHeight > maxContentHeight) {
-                    // Add a new page
-                    doc.addPage();
-                    isFirstPage = false;
-                    
-                    // Reset Y position and redraw headers
-                    currentY = 30; // Start higher on continuation pages
-                    doc.setFont('helvetica', 'bold');
-                    doc.setFontSize(10);
-                    
-                    // Redraw table headers on new page
-                    doc.text('Items Description', startX + 2, currentY + 6, { maxWidth: colWidths[0] - 4 });
-                    doc.text('Division', startX + colWidths[0] + 2, currentY + 6, { maxWidth: colWidths[1] - 4 });
-                    doc.text('Square Meters', startX + colWidths[0] + colWidths[1] + 2, currentY + 6, { maxWidth: colWidths[2] - 4 });
-                    doc.text('Price/Sq Meter', startX + colWidths[0] + colWidths[1] + colWidths[2] + 2, currentY + 6, { maxWidth: colWidths[3] - 4 });
-                    doc.text('Amount', startX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + 2, currentY + 6, { maxWidth: colWidths[4] - 4 });
-                    
-                    currentY += 8; // Move below headers
-                    doc.setFont('helvetica', 'normal');
-                    doc.setFontSize(9);
-                }
-
-                // Draw cell borders
-                let colX = startX;
-                for (let i = 0; i < colWidths.length; i++) {
-                    doc.rect(colX, currentY, colWidths[i], rowHeight);
-                    colX += colWidths[i];
-                }
-
-                // Draw wrapped text
-                nameLines.forEach((line, idx) => {
-                    doc.text(line, startX + 2, currentY + 6 + (idx * 7), { maxWidth: colWidths[0] - 4 });
-                });
-                designationLines.forEach((line, idx) => {
-                    doc.text(line, startX + colWidths[0] + 2, currentY + 6 + (idx * 7), { maxWidth: colWidths[1] - 4 });
-                });
-                
-                // Other columns (single line, vertically centered)
-                const vCenter = currentY + rowHeight / 2 + 2;
-                const totalHours = `${formatNumber(item.quantity)} m`;
-                const priceHour = formatNumber(item.unitPrice);
-                const subtotal = formatNumber(item.subtotal);
-                
-                doc.text(totalHours, startX + colWidths[0] + colWidths[1] + 2, vCenter, { maxWidth: colWidths[2] - 4 });
-                doc.text(priceHour, startX + colWidths[0] + colWidths[1] + colWidths[2] + 2, vCenter, { maxWidth: colWidths[3] - 4 });
-                doc.text(subtotal, startX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + 2, vCenter, { maxWidth: colWidths[4] - 4 });
-
-                currentY += rowHeight;
+            // Generate PDF
+            const doc = new jsPDF({
+                orientation: 'portrait',
+                unit: 'mm',
+                format: 'a4'
             });
 
-            // Add summary section on the last page
-            const summaryStartY = currentY + 10;
-            doc.setFont('helvetica', 'bold');
-            doc.setFontSize(10);
-
-            // Summary box
-            const summaryWidth = 80;
-            const summaryX = doc.internal.pageSize.width - summaryWidth - 15;
-
-            // Check if summary fits on current page, if not add a new page
-            if (summaryStartY + 40 > maxContentHeight) {
-                doc.addPage();
-                currentY = 30;
-            }
-
-            // Draw summary box
-            doc.rect(summaryX, currentY, summaryWidth, 30);
-
-            // Summary text
-            doc.text('Subtotal:', summaryX + 5, currentY + 8);
-            doc.text('Tax (15%):', summaryX + 5, currentY + 16);
-            doc.text('Total Amount:', summaryX + 5, currentY + 24);
-
-            // Summary values
-            doc.setFont('helvetica', 'normal');
-            doc.text(formatCurrency(invoice.subtotal), summaryX + summaryWidth - 5, currentY + 8, { align: 'right' });
-            doc.text(formatCurrency(invoice.tax), summaryX + summaryWidth - 5, currentY + 16, { align: 'right' });
-            doc.text(formatCurrency(invoice.total), summaryX + summaryWidth - 5, currentY + 24, { align: 'right' });
-
-            // Add total in words
-            doc.setFont('helvetica', 'italic');
-            doc.setFontSize(9);
-            const totalInWords = `(${numberToWords(Math.round(invoice.total * 100) / 100)})`;
-            doc.text(totalInWords, 15, currentY + 40);
-
-            // Add page numbers to all pages
-            const totalPages = doc.internal.getNumberOfPages();
-            for (let i = 1; i <= totalPages; i++) {
-                doc.setPage(i);
-                doc.setFont('helvetica', 'normal');
-                doc.setFontSize(10);
-                const pageText = `Page ${i} of ${totalPages}`;
-                const textWidth = doc.getStringUnitWidth(pageText) * (-80) / doc.internal.scaleFactor;
-                const textX = (doc.internal.pageSize.width - textWidth) / 2;
-                doc.text(pageText, textX, doc.internal.pageSize.height - 35);
-            }
-
-            // Add footer image only on the last page
             try {
-                const footerPath = getResourcePath('footer.png');
-                const footerData = fs.readFileSync(footerPath);
-                const footerBase64 = Buffer.from(footerData).toString('base64');
-                const footerY = doc.internal.pageSize.height - 30;
-                doc.addImage('data:image/png;base64,' + footerBase64, 'PNG', 0, footerY, doc.internal.pageSize.width, 30);
+                // Read and add the logo
+                const logoPath = getResourcePath('logo.png');
+                const logoData = fs.readFileSync(logoPath);
+                const logoBase64 = Buffer.from(logoData).toString('base64');
+                
+                // Add company logo and header
+                const fullPageWidth = doc.internal.pageSize.width;
+                const logoHeight = 50;
+                
+                doc.addImage('data:image/png;base64,' + logoBase64, 'PNG', 0, 10, fullPageWidth, logoHeight);
+
+                // Reset text settings
+                doc.setTextColor(0, 0, 0);
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(11);
+
+                const headerBottomY = 60;
+                let currentY = headerBottomY + 5;
+
+                // Blue header bar for "VAT INVOICE / فاتورة ضريبية"
+                doc.setFillColor(70, 130, 180); // Steel blue color
+                doc.rect(15, currentY, doc.internal.pageSize.width - 30, 10, 'F');
+                
+                // White text on blue background
+                doc.setTextColor(255, 255, 255);
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(14);
+                renderArabicText(doc, 'VAT INVOICE / فاتورة ضريبية', doc.internal.pageSize.width / 2, currentY + 7, { align: 'center' });
+                
+                currentY += 12;
+
+                // Reset text color to black
+                doc.setTextColor(0, 0, 0);
+
+                // Two-column layout for addresses
+                const leftBoxX = 15;
+                const rightBoxX = doc.internal.pageSize.width / 2 + 2;
+                const boxWidth = (doc.internal.pageSize.width - 34) / 2;
+                const boxHeight = 35;
+
+                // Draw boxes for both addresses
+                doc.setDrawColor(0, 0, 0);
+                doc.setLineWidth(0.3);
+                doc.rect(leftBoxX, currentY, boxWidth, boxHeight); // Left box (From)
+                doc.rect(rightBoxX, currentY, boxWidth, boxHeight); // Right box (To)
+
+                // LEFT BOX - "From" (Hardcoded company address)
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(9);
+                let leftY = currentY + 5;
+                
+                // From label (English left, Arabic right)
+                doc.text('From', leftBoxX + 3, leftY);
+                renderArabicText(doc, 'من عنوان', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
+                leftY += 5;
+
+                // Company name
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(8);
+                doc.text('JUDE MOHAMMED HUSSEIN AL-SHARIF GEN. CONT. EST.', leftBoxX + 3, leftY, { maxWidth: boxWidth - 6 });
+                leftY += 4;
+
+                // Address label
+                doc.setFont('helvetica', 'bold');
+                doc.text('Address:', leftBoxX + 3, leftY);
+                renderArabicText(doc, 'العنوان', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
+                leftY += 4;
+
+                // Address details
+                doc.setFont('helvetica', 'normal');
+                doc.text('Build No. 2626 - Al Quds, 7847 Abu Shajarah Dist.', leftBoxX + 3, leftY, { maxWidth: boxWidth - 6 });
+                leftY += 4;
+                doc.text('48321 Umluj - Kingdom Of Saudi Arabia', leftBoxX + 3, leftY, { maxWidth: boxWidth - 6 });
+                leftY += 5;
+
+                // VAT Number
+                doc.setFont('helvetica', 'bold');
+                doc.text('VAT:', leftBoxX + 3, leftY);
+                doc.setFont('helvetica', 'normal');
+                doc.text('311537435500003', leftBoxX + 12, leftY);
+                renderArabicText(doc, 'الرقم الضريبي', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
+                leftY += 4;
+
+                // CR Number
+                doc.setFont('helvetica', 'bold');
+                doc.text('CR No:', leftBoxX + 3, leftY);
+                doc.setFont('helvetica', 'normal');
+                doc.text('4701103471', leftBoxX + 15, leftY);
+                renderArabicText(doc, 'السجل التجاري', leftBoxX + boxWidth - 3, leftY, { align: 'right' });
+
+                // RIGHT BOX - "To" (Customer address from form)
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(9);
+                let rightY = currentY + 5;
+                
+                // To label (English left, Arabic right)
+                doc.text('To', rightBoxX + 3, rightY);
+                renderArabicText(doc, 'إلى', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
+                rightY += 5;
+
+                // Customer/Company name
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(8);
+                doc.text(invoice.customerName, rightBoxX + 3, rightY, { maxWidth: boxWidth - 6 });
+                rightY += 5;
+
+                // Address label (if address exists)
+                if (invoice.address) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('Address:', rightBoxX + 3, rightY);
+                    renderArabicText(doc, 'العنوان', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
+                    rightY += 4;
+
+                    // Address details
+                    doc.setFont('helvetica', 'normal');
+                    doc.text(invoice.address, rightBoxX + 3, rightY, { maxWidth: boxWidth - 6 });
+                    rightY += 5;
+                }
+
+                // VAT Number
+                if (invoice.vatNumber) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('VAT:', rightBoxX + 3, rightY);
+                    doc.setFont('helvetica', 'normal');
+                    doc.text(invoice.vatNumber, rightBoxX + 12, rightY);
+                    renderArabicText(doc, 'الرقم الضريبي', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
+                    rightY += 4;
+                }
+
+                // CR Number
+                if (invoice.crNumber) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('CR No:', rightBoxX + 3, rightY);
+                    doc.setFont('helvetica', 'normal');
+                    doc.text(invoice.crNumber, rightBoxX + 15, rightY);
+                    renderArabicText(doc, 'السجل التجاري', rightBoxX + boxWidth - 3, rightY, { align: 'right' });
+                }
+
+                currentY += boxHeight + 5;
+
+                // Additional invoice details (after the address boxes)
+                // Invoice number and date in header row
+                const infoRowY = currentY;
+                
+                // Left side - Invoice Number
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(9);
+                doc.text('Invoice No:', leftBoxX + 3, infoRowY);
+                renderArabicText(doc, 'رقم الفاتورة', leftBoxX + boxWidth - 3, infoRowY, { align: 'right' });
+                
+                doc.setFont('helvetica', 'normal');
+                doc.text(invoiceNumber, leftBoxX + 25, infoRowY);
+                
+                // Right side - Date
+                const formattedDate = new Date(invoice.date).toLocaleDateString('en-GB');
+                doc.setFont('helvetica', 'bold');
+                doc.text('Date:', rightBoxX + 3, infoRowY);
+                renderArabicText(doc, 'التاريخ', rightBoxX + boxWidth - 3, infoRowY, { align: 'right' });
+                
+                doc.setFont('helvetica', 'normal');
+                doc.text(formattedDate, rightBoxX + 20, infoRowY);
+                
+                currentY += 7;
+
+                // Additional invoice details in rows
+                const leftColX = 15;
+                const labelWidth = 35;
+                const valueStartX = leftColX + labelWidth;
+                const rowSpacing = 6;
+                let detailY = currentY;
+
+                doc.setFontSize(8);
+
+                // Supply Date
+                if (invoice.supplyDate) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('Supply Date:', leftColX, detailY);
+                    doc.setFont('helvetica', 'normal');
+                    doc.text(new Date(invoice.supplyDate).toLocaleDateString(), valueStartX, detailY);
+                    detailY += rowSpacing;
+                }
+
+                // Due Date
+                if (invoice.dueDate) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('Due Date:', leftColX, detailY);
+                    doc.setFont('helvetica', 'normal');
+                    doc.text(new Date(invoice.dueDate).toLocaleDateString(), valueStartX, detailY);
+                    detailY += rowSpacing;
+                }
+
+                // Contract Number
+                if (invoice.contractNumber) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('Contract/PO:', leftColX, detailY);
+                    doc.setFont('helvetica', 'normal');
+                    doc.text(invoice.contractNumber, valueStartX, detailY);
+                    detailY += rowSpacing;
+                }
+
+                // Invoice Period
+                if (invoice.invoicePeriod) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('Invoice Period:', leftColX, detailY);
+                    doc.setFont('helvetica', 'normal');
+                    doc.text(invoice.invoicePeriod, valueStartX, detailY);
+                    detailY += rowSpacing;
+                }
+
+                // Project Number
+                if (invoice.projectNumber) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.text('Project/Ref No:', leftColX, detailY);
+                    doc.setFont('helvetica', 'normal');
+                    doc.text(invoice.projectNumber, valueStartX, detailY);
+                    detailY += rowSpacing;
+                }
+
+                // Bank details
+                detailY += 2;
+                doc.setFont('helvetica', 'bold');
+                doc.text('Bank Name:', leftColX, detailY);
+                doc.setFont('helvetica', 'normal');
+                doc.text('Alrajhi Bank', valueStartX, detailY);
+                detailY += rowSpacing;
+
+                doc.setFont('helvetica', 'bold');
+                doc.text('Account Title:', leftColX, detailY);
+                doc.setFont('helvetica', 'normal');
+                doc.text('Rakan Hussein Al-Fatih Contracting Company', valueStartX, detailY);
+                detailY += rowSpacing;
+
+                doc.setFont('helvetica', 'bold');
+                doc.text('IBAN:', leftColX, detailY);
+                doc.setFont('helvetica', 'normal');
+                doc.text('SA6280000146608016555919', valueStartX, detailY);
+                
+                // QR code on the right side
+                const qrWidth = 35;
+                const qrX = doc.internal.pageSize.width - qrWidth - 15;
+                const qrY = currentY;
+                doc.addImage(qrImage, 'PNG', qrX, qrY, qrWidth, qrWidth);
+
+                detailY += rowSpacing + 8;
+
+                // Items table
+                let startY = detailY;
+                let startX = 15;
+                const tableWidth = doc.internal.pageSize.width - 30;
+
+                // Column widths for 8 columns
+                const colWidths = [
+                    tableWidth * 0.20, // Items Description
+                    tableWidth * 0.10, // Unit
+                    tableWidth * 0.10, // Quantity
+                    tableWidth * 0.12, // Unit Price
+                    tableWidth * 0.08, // VAT %
+                    tableWidth * 0.12, // VAT Amount
+                    tableWidth * 0.14, // Total excl VAT
+                    tableWidth * 0.14  // Total Amount
+                ];
+
+                // Table headers
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(9);
+                let colX = startX;
+                const headers = ['Items Description', 'Unit', 'Quantity/No', 'Unit Price', 'VAT %', 'VAT Amount', 'Total excl VAT', 'Total Amount'];
+                headers.forEach((header, i) => {
+                    doc.text(header, colX + 2, startY + 6, { maxWidth: colWidths[i] - 4 });
+                    colX += colWidths[i];
+                });
+
+                // Table content
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(9);
+                currentY = startY + 8;
+                const pageHeight = doc.internal.pageSize.height;
+                const footerHeight = 60;
+                const maxContentHeight = pageHeight - footerHeight;
+
+                items.forEach((item, index) => {
+                    const wrapText = (text, width) => {
+                        let lines = doc.splitTextToSize(text, width - 4);
+                        if (lines.length > 2) {
+                            lines = [lines[0], lines[1].slice(0, width/2) + '...'];
+                        }
+                        return lines;
+                    };
+                    
+                    const nameLines = wrapText(item.productName || '', colWidths[0]);
+                    const unitLines = wrapText(item.unit || '', colWidths[1]);
+                    const rowHeight = Math.max(8, nameLines.length * 7, unitLines.length * 7);
+
+                    // Check if new page needed
+                    if (currentY + rowHeight > maxContentHeight) {
+                        doc.addPage();
+                        currentY = 30;
+                        
+                        // Redraw headers
+                        doc.setFont('helvetica', 'bold');
+                        doc.setFontSize(9);
+                        colX = startX;
+                        headers.forEach((header, i) => {
+                            doc.text(header, colX + 2, currentY + 6, { maxWidth: colWidths[i] - 4 });
+                            colX += colWidths[i];
+                        });
+                        
+                        currentY += 8;
+                        doc.setFont('helvetica', 'normal');
+                    }
+
+                    // Draw cell borders
+                    colX = startX;
+                    for (let i = 0; i < colWidths.length; i++) {
+                        doc.rect(colX, currentY, colWidths[i], rowHeight);
+                        colX += colWidths[i];
+                    }
+
+                    // Draw content
+                    const vCenter = currentY + rowHeight / 2 + 2;
+                    
+                    // Items Description (wrapped)
+                    nameLines.forEach((line, idx) => {
+                        doc.text(line, startX + 2, currentY + 6 + (idx * 7), { maxWidth: colWidths[0] - 4 });
+                    });
+                    
+                    // Unit (wrapped)
+                    unitLines.forEach((line, idx) => {
+                        doc.text(line, startX + colWidths[0] + 2, currentY + 6 + (idx * 7), { maxWidth: colWidths[1] - 4 });
+                    });
+                    
+                    // Other columns (centered vertically)
+                    doc.text(formatNumber(item.quantity), startX + colWidths[0] + colWidths[1] + 2, vCenter);
+                    doc.text(formatNumber(item.unitPrice), startX + colWidths[0] + colWidths[1] + colWidths[2] + 2, vCenter);
+                    doc.text(formatNumber(item.vatPercent) + '%', startX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + 2, vCenter);
+                    doc.text(formatNumber(item.vatAmount), startX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + 2, vCenter);
+                    doc.text(formatNumber(item.totalAmountExclVat), startX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5] + 2, vCenter);
+                    doc.text(formatNumber(item.totalAmount), startX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5] + colWidths[6] + 2, vCenter);
+
+                    currentY += rowHeight;
+                });
+
+                // Summary section
+                const summaryStartY = currentY + 10;
+                const summaryWidth = 80;
+                const summaryX = doc.internal.pageSize.width - summaryWidth - 15;
+
+                // Check if summary fits
+                if (summaryStartY + 40 > maxContentHeight) {
+                    doc.addPage();
+                    currentY = 30;
+                }
+
+                // Draw summary box
+                doc.rect(summaryX, currentY, summaryWidth, 30);
+
+                // Summary labels
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(10);
+                doc.text('Subtotal:', summaryX + 5, currentY + 8);
+                doc.text('VAT (15%):', summaryX + 5, currentY + 16);
+                doc.text('Total Amount:', summaryX + 5, currentY + 24);
+
+                // Summary values
+                doc.setFont('helvetica', 'normal');
+                doc.text(formatCurrency(invoice.subtotal), summaryX + summaryWidth - 5, currentY + 8, { align: 'right' });
+                doc.text(formatCurrency(invoice.tax), summaryX + summaryWidth - 5, currentY + 16, { align: 'right' });
+                doc.text(formatCurrency(invoice.total), summaryX + summaryWidth - 5, currentY + 24, { align: 'right' });
+
+                // Total in words
+                doc.setFont('helvetica', 'italic');
+                doc.setFontSize(9);
+                const totalInWords = `(${numberToWords(Math.round(invoice.total * 100) / 100)})`;
+                doc.text(totalInWords, 15, currentY + 40);
+
+                // Add page numbers
+                const totalPages = doc.internal.getNumberOfPages();
+                for (let i = 1; i <= totalPages; i++) {
+                    doc.setPage(i);
+                    doc.setFont('helvetica', 'normal');
+                    doc.setFontSize(10);
+                    const pageText = `Page ${i} of ${totalPages}`;
+                    const textWidth = doc.getStringUnitWidth(pageText) * doc.internal.getFontSize() / doc.internal.scaleFactor;
+                    const textX = (doc.internal.pageSize.width - textWidth) / 2;
+                    doc.text(pageText, textX, doc.internal.pageSize.height - 35);
+                }
+
+                // Add footer image on last page
+                try {
+                    const footerPath = getResourcePath('footer.png');
+                    const footerData = fs.readFileSync(footerPath);
+                    const footerBase64 = Buffer.from(footerData).toString('base64');
+                    const footerY = doc.internal.pageSize.height - 30;
+                    doc.addImage('data:image/png;base64,' + footerBase64, 'PNG', 0, footerY, doc.internal.pageSize.width, 30);
+                } catch (error) {
+                    console.error('Error adding footer:', error);
+                }
+
+                // Save invoice data
+                await ipcRenderer.invoke('save-invoice', invoice);
+
+                // Save PDF
+                const pdfBuffer = doc.output('arraybuffer');
+                const pdfPath = await ipcRenderer.invoke('save-pdf', pdfBuffer);
+
+                showAlert('Invoice has been generated successfully!');
+                ensureInputsEditable();
+
+                // Clear the form after successful generation
+                clearForm();
+                clearItemsTable();
+                editingFileName = null;
+
             } catch (error) {
-                console.error('Error adding footer:', error);
+                console.error('Error generating invoice:', error);
+                showAlert('Error generating invoice: ' + (error && error.message ? error.message : error));
+                ensureInputsEditable();
             }
-
-            // Save invoice data
-            await ipcRenderer.invoke('save-invoice', invoice);
-
-            // Save PDF
-            const pdfBuffer = doc.output('arraybuffer');
-            const pdfPath = await ipcRenderer.invoke('save-pdf', pdfBuffer);
-
-            showAlert('Invoice has been generated successfully!');
-            ensureInputsEditable();
-
-            // Clear the form after successful generation
-            clearForm();
-            clearItemsTable();
-
-            // After saving, clear editingFileName
-            editingFileName = null;
         } catch (error) {
             console.error('Error generating invoice:', error);
-            showAlert('Error generating invoice: ' + (error && error.message ? error.message : error));
+            showAlert('Error generating invoice: ' + error.message);
             ensureInputsEditable();
         }
-    } catch (error) {
-        console.error('Error generating invoice:', error);
-        showAlert('Error generating invoice: ' + (error && error.message ? error.message : error));
-        ensureInputsEditable();
-    }
-});
+    });
+}
 
 // Helper function to convert number to words
 function numberToWords(number) {
     const ones = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
     const tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
     const teens = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
-    const scales = ['', 'thousand', 'million', 'billion'];
-
-    function convertGroup(n) {
-        if (n === 0) return '';
-
-        let result = '';
-
-        // Handle hundreds
-        if (n >= 100) {
-            result += ones[Math.floor(n / 100)] + ' hundred ';
-            n %= 100;
-            if (n > 0) result += 'and ';
-        }
-
-        // Handle tens and ones
-        if (n >= 20) {
-            result += tens[Math.floor(n / 10)] + ' ';
-            if (n % 10 > 0) result += ones[n % 10] + ' ';
-        } else if (n >= 10) {
-            result += teens[n - 10] + ' ';
-        } else if (n > 0) {
-            result += ones[n] + ' ';
-        }
-
-        return result;
-    }
-
+    
     if (number === 0) return 'zero';
-
+    
     const wholePart = Math.floor(number);
     const decimalPart = Math.round((number - wholePart) * 100);
-
-    let result = '';
-    let groupCount = 0;
-    let num = wholePart;
-
-    while (num > 0) {
-        const n = num % 1000;
-        if (n !== 0) {
-            const words = convertGroup(n);
-            result = words + scales[groupCount] + ' ' + result;
-        }
-        num = Math.floor(num / 1000);
-        groupCount++;
-    }
-
-    result = result.trim();
-
-    // Add decimal part if exists
-    if (decimalPart > 0) {
-        result += ' and ' + convertGroup(decimalPart).trim() + 'cents';
-    }
-
-    // Capitalize first letter and ensure proper formatting
-    result = result.charAt(0).toUpperCase() + result.slice(1).toLowerCase();
     
-    return result || 'Zero';
+    let result = wholePart.toString();
+    
+    if (decimalPart > 0) {
+        result += ' and ' + decimalPart + ' cents';
+    }
+    
+    return result;
 }
